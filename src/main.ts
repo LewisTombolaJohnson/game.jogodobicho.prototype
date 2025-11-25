@@ -262,7 +262,7 @@ function attachTicketPanelInteractions(){
 
 let winGlowRefs: Graphics[] = [];
 function renderTickets(){
-  if (!ticketsHeaderContainer || !ticketsListContainer) return;
+  if (!app || !leftContainer || !ticketsHeaderContainer || !ticketsListContainer) return;
   winGlowRefs = [];
   ticketsListContainer.removeChildren();
   // Header (simple summary / could show total stake)
@@ -372,6 +372,7 @@ function getAnimalByTwoDigits(two: string) {
 
 // Build animal grid
 function buildGrid() {
+  if (!app || !centerContainer) return;
   centerContainer.removeChildren();
   const editing = currentEditingTicket();
   const selectedIds = new Set(editing?.animals || []);
@@ -521,6 +522,7 @@ function buildLeftSpacer() { // renamed function preserved for layout calls
 
 // Layout and sizing functions
 function layout() {
+  if (!app || !leftContainer || !centerContainer || !rightContainer) return;
   const w = app.renderer.width;
   const h = app.renderer.height;
   // Potential total width
@@ -735,14 +737,7 @@ function createRandomTicket(){
   });
 }
 randomBtn?.addEventListener('click', createRandomTicket);
-
-// Initial ticket render
-renderTickets(); refreshStakeLimitStatus(); updatePlayButtonState(); updateRandomButtonState(); updateClearButtonState();
-buildGrid();
-layout();
-buildLeftSpacer(); // ensure left spacer draws once grid sized
-buildRightSlots();
-layout();
+// Removed premature initial render sequence; postInit() handles first draw after Pixi ready.
 window.addEventListener('resize', () => { buildGrid(); layout(); });
 
 // Play button logic retains background numerals

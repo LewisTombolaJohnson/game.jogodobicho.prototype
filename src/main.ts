@@ -276,6 +276,8 @@ leftContainer.eventMode = 'static'; // using DOM wheel listener instead of Pixi 
 let ticketsPanelHeight = 0;
 const ticketsScrollbar = new Graphics();
 leftContainer.addChild(ticketsScrollbar);
+// Desktop ticket panel background graphic reference (used as mask background); destroyed in mobile mode
+let desktopTicketMask: Graphics | null = null;
 let isDraggingTickets = false;
 let dragStartY = 0;
 let dragInitialScrollY = 0;
@@ -472,6 +474,14 @@ function renderTicketsMobile(prevVisual:Record<number,number>){
   const bg = new Graphics(); bg.roundRect(0,0,panelWidth,stripHeight,0); bg.fill({ color:0x151c1d, alpha:0.94 }); bg.stroke({ color:0x24313d, width:2 }); ticketsHeaderContainer.addChild(bg);
   const scrollContainer = new Container(); ticketsListContainer.addChild(scrollContainer);
   if (!tickets.length){ ticketsVisibleHeight = stripHeight; ticketsPanelHeight = stripHeight; return; }
+  // Pre-sort tickets by lastWin descending when idle (so best appear left). If none have lastWin, keep existing order.
+  if (!isPlaying){
+    tickets.sort((a,b)=>{
+      const aw = a.lastWin || 0; const bw = b.lastWin || 0;
+      if (bw === aw) return a.id - b.id;
+      return bw - aw;
+    });
+  }
   let xCursor = 12; const gapX = 12;
   tickets.forEach(ticket => {
     const cardW = 160; const cardH = 72;
@@ -503,6 +513,21 @@ function renderTicketsMobile(prevVisual:Record<number,number>){
   const endDrag=()=>{ dragging=false; scrollContainer.cursor='grab'; };
   scrollContainer.on('pointerup',endDrag); scrollContainer.on('pointerupoutside',endDrag);
   scrollContainer.on('pointermove',(e:any)=>{ if(!dragging) return; const dx=e.global.x - dragStartX; scrollContainer.x = baseX + dx; const maxScroll=12; const minScroll=Math.min(12, panelWidth - (xCursor)); if(scrollContainer.x>maxScroll) scrollContainer.x=maxScroll; if(scrollContainer.x<minScroll) scrollContainer.x=minScroll; });
+  // Horizontal wheel scroll support (shift to horizontal translation)
+  const wheelHandler = (e:WheelEvent) => {
+    const rect = app.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left; const my = e.clientY - rect.top;
+    // Only scroll if within strip vertical bounds
+    if (my >= leftContainer.y && my <= leftContainer.y + stripHeight){
+      e.preventDefault(); e.stopPropagation();
+      const maxScroll=12; const minScroll=Math.min(12, panelWidth - (xCursor));
+      scrollContainer.x = Math.max(minScroll, Math.min(maxScroll, scrollContainer.x - e.deltaY));
+    }
+  };
+  window.addEventListener('wheel', wheelHandler, { passive:false });
+  // Clean up listener when re-render (simple approach: remove previous if stored)
+  (renderTicketsMobile as any)._wheelHandler && window.removeEventListener('wheel', (renderTicketsMobile as any)._wheelHandler);
+  (renderTicketsMobile as any)._wheelHandler = wheelHandler;
   ticketsVisibleHeight = stripHeight; ticketsPanelHeight = stripHeight; ticketsListContainer.y = 0; ticketsHeaderContainer.y = 0;
 }
 
@@ -673,20 +698,17 @@ function buildLeftSpacer() { // renamed function preserved for layout calls
   leftContainer.removeChildren();
   const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
   const headerHeight = 28;
-  // Draw background starting BELOW header so header appears "freed"
-  const bg = new Graphics();
-  bg.roundRect(0,headerHeight,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight - headerHeight),18);
-  bg.fill({ color: 0x1a2027 });
-  bg.stroke({ color:0x2e3a47, width:2 });
-  leftContainer.addChild(bg);
+  // Draw background starting BELOW header so header appears "freed" (use dark fill to avoid white flash)
+  desktopTicketMask?.destroy();
+  desktopTicketMask = new Graphics();
+  desktopTicketMask.roundRect(0,headerHeight,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight - headerHeight),18);
+  desktopTicketMask.fill({ color: 0x1a2027 });
+  desktopTicketMask.stroke({ color:0x2e3a47, width:2 });
+  leftContainer.addChild(desktopTicketMask);
   // Header sits above bg now
   leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer);
-  // Mask covers only list area beneath header
-  const mask = new Graphics();
-  mask.rect(0,headerHeight,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight - headerHeight));
-  mask.fill(0xffffff);
-  leftContainer.addChild(mask);
-  ticketsListContainer.mask = mask;
+  // Optional mask removed to prevent white rectangle; enable only if content overflows
+  ticketsListContainer.mask = null;
   // Scrollbar above mask
   leftContainer.addChild(ticketsScrollbar);
   ticketsVisibleHeight = Math.max(0, gridHeight - headerHeight);
@@ -733,6 +755,15 @@ function layout() {
   // Align result row horizontally with grid (centered beneath animal box matrix)
   rightContainer.x = centerContainer.x;
     rightContainer.y = centerContainer.y + centerContainer.height + interGap;
+    // If result row would extend beyond available viewport (minus bottom bar), reduce grid scale slightly
+    const overflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT) - (h - bottomBarApprox);
+    if (overflow > 0){
+      const reduceFactor = Math.max(0.85, (centerContainer.height - overflow) / centerContainer.height);
+      centerContainer.scale.set(centerContainer.scale.x * reduceFactor);
+      centerContainer.x = (w - centerContainer.width)/2;
+      centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
+      rightContainer.y = centerContainer.y + centerContainer.height + interGap;
+    }
     // Render tickets AFTER positioning leftContainer so strip uses correct y
     renderTickets();
     // Build result slots after assigning rightContainer.y
@@ -1194,6 +1225,12 @@ if (playBtn) {
     tickets.filter(t=>t.complete).forEach(ticket => {
       const { multiplier, posMatches, anyMatches } = computeTicketWin(ticket, progressiveDrawn);
       ticket.posMatches = posMatches; ticket.anyMatches = anyMatches; ticket.lastWin = ticket.stake * multiplier; totalWin += ticket.lastWin;
+    });
+    // Final post-play ordering (highest lastWin first) for subsequent mobile strip display
+    tickets.sort((a,b)=>{
+      const aw = a.lastWin || 0; const bw = b.lastWin || 0;
+      if (bw === aw) return a.id - b.id;
+      return bw - aw;
     });
     if (totalWin > 0) {
       animateBalanceTo(balance + totalWin);

@@ -1,6 +1,8 @@
 import { Application, Container, Graphics, Text, TextStyle, Rectangle } from 'pixi.js';
-// Boot instrumentation markers (will help diagnose GitHub Pages issues)
-console.log('[boot] module start');
+// Diagnostic flags for external inspection
+// @ts-ignore
+window.__PIXIBUNDLE_LOADED = true;
+console.log('[diag] bundle evaluated');
 import { animals } from './animals';
 
 // Ticket data structures
@@ -129,253 +131,85 @@ function clearTickets() {
   renderTickets(); buildGrid(); layout(); refreshStakeLimitStatus(); updatePlayButtonState(); updateClearButtonState();
 }
 
-// Pixi init with instrumentation + guarded attachment
+// Deferred Pixi bootstrap: wait for DOMContentLoaded so #app-root exists; handle duplicate roots.
 let app: Application;
-try {
-  console.log('[boot] creating Application');
-  app = new Application();
-  // Add early capability diagnostics before init
-  const testCanvas = document.createElement('canvas');
-  const gl = testCanvas.getContext('webgl');
-  const webgl2 = testCanvas.getContext('webgl2');
-  console.log('[boot] capability check', { webgl: !!gl, webgl2: !!webgl2, ua: navigator.userAgent });
-  // Listen for preload/dynamic import failures
-  window.addEventListener('vite:preloadError', (e:any)=>{
-    console.error('[boot] EVENT vite:preloadError', e?.payload || e);
-  });
-  window.addEventListener('error', (e:any)=>{
-    console.error('[boot] EVENT window.error', e?.message || e);
-  });
-  window.addEventListener('unhandledrejection', (e:any)=>{
-    console.error('[boot] EVENT unhandledrejection', e?.reason || e);
-  });
-  const initStart = performance.now();
-  const initOptions = { background: '#12151c', resizeTo: window, antialias: true, preference: 'webgl' as const };
-  console.log('[boot] calling app.init with options', initOptions);
-  const INIT_TIMEOUT_MS = 4000;
-  let initResolved = false;
-  // Pre-fetch expected dynamic chunks to surface 404 / CSP issues early
-  // Determine actual chunk filenames already emitted by Vite (avoid synthetic probe 404s)
-  const expectedChunks: string[] = [];
+let leftContainer: Container; let centerContainer: Container; let rightContainer: Container;
+async function initPixi(){
+  console.log('[bootstrap] starting');
   try {
-    const scriptTags = Array.from(document.querySelectorAll('script')); // index + dynamic chunk preloads present
-    scriptTags.forEach(s => {
-      const src = s.getAttribute('src');
-      if (src && /assets\/.+\.js$/.test(src) && !/index-/.test(src)) {
-        // record base chunk label for reporting
-        const file = src.split('/').pop()!; // e.g. WebGLRenderer-Wkavy6li.js
-        expectedChunks.push(file);
-      }
-    });
-  } catch (scanErr){
-    console.warn('[boot] unable to scan existing chunk scripts', scanErr);
+    app = new Application();
+    await app.init({ background: '#12151c', resizeTo: window, antialias: true, preference: 'webgl' });
+  } catch(err){
+    console.error('[bootstrap] app.init failed', err);
+    // @ts-ignore
+    window.__PIXIBOOT_ERROR = err;
+    return;
   }
-  const chunkResults: Record<string,{ok:boolean; status:number; url:string}> = {};
+  const roots = Array.from(document.querySelectorAll('#app-root')) as HTMLElement[];
+  if (roots.length > 1){
+    console.warn('[bootstrap] multiple #app-root elements found; removing extras', roots.length);
+    roots.slice(1).forEach(r=> r.remove());
+  }
+  const root = roots[0] || (()=> {
+    const r = document.createElement('div'); r.id='app-root'; document.body.prepend(r); return r;
+  })();
   try {
-    await Promise.all(expectedChunks.map(async fileName => {
-      const tag = Array.from(document.querySelectorAll('script')).find(s=> (s.getAttribute('src')||'').endsWith(fileName));
-      const chunkUrl = tag?.getAttribute('src');
-      if (!chunkUrl){
-        chunkResults[fileName] = { ok:false, status:404, url:'<missing script tag>' }; return;
-      }
-      try {
-        const res = await fetch(chunkUrl, { method:'GET' });
-        chunkResults[fileName] = { ok: res.ok, status: res.status, url: chunkUrl };
-      } catch (fetchErr){
-        chunkResults[fileName] = { ok:false, status: -1, url: chunkUrl };
-        console.error('[boot] chunk fetch error', fileName, fetchErr);
-      }
-    }));
-    console.log('[boot] chunk prefetch summary', chunkResults);
-  } catch (prefErr){
-    console.warn('[boot] chunk prefetch failed overall', prefErr);
-  }
-  // Periodic state logger until init resolves (every 1s)
-  const stateInterval = setInterval(()=>{
-    if (initResolved){ clearInterval(stateInterval); return; }
-    const renderer = (app as any).renderer;
-    const rType = renderer?.name;
-    const canvasAttached = !!app.canvas?.parentElement;
-    console.log('[boot] heartbeat', { rType, canvasAttached, initResolved });
-  }, 1000);
-  const initPromise = app.init(initOptions).then(()=>{
-    initResolved = true;
-  });
-  // Race with timeout for diagnostic logging (does not cancel real init)
-  await Promise.race([
-    initPromise,
-    new Promise(res=> setTimeout(()=>{
-      if (!initResolved){
-        console.warn('[boot] TIMEOUT: app.init has not resolved after', INIT_TIMEOUT_MS, 'ms');
-        // Dump currently loaded script tags for asset path inspection
-        const scripts = Array.from(document.querySelectorAll('script')).map(s=>({src:s.getAttribute('src'), type:s.type}));
-        console.log('[boot] scripts present at timeout', scripts);
-        console.log('[boot] chunk prefetch snapshot at timeout', chunkResults);
-        // Surface simple overlay so remote viewer knows it timed out
-        const overlay = document.createElement('div');
-        overlay.style.cssText='position:fixed;top:8px;right:8px;background:#222;border:1px solid #444;padding:10px;font:12px system-ui;color:#eee;max-width:320px;z-index:9999;line-height:1.4';
-        const failed = Object.entries(chunkResults).filter(([,v])=>!v.ok).map(([k,v])=>`${k} (${v.status})`);
-        overlay.innerHTML = `<b>Init timeout (${INIT_TIMEOUT_MS}ms)</b><br/>Failed chunks: ${failed.length?failed.join(', '):'None'}<br/>Renderer object present: ${!!(app as any).renderer}`;
-        document.body.appendChild(overlay);
-        // Schedule emergency fallback canvas if still unresolved later
-        setTimeout(()=>{
-          if (!initResolved){
-            console.warn('[boot] EMERGENCY FALLBACK: creating placeholder canvas');
-            if (!app.canvas.parentElement){
-              const emergency = document.createElement('canvas');
-              emergency.width = 800; emergency.height = 600;
-              emergency.style.background = '#111';
-              const ctx = emergency.getContext('2d');
-              ctx!.fillStyle = '#fff';
-              ctx!.font = '16px system-ui';
-              ctx!.fillText('Fallback canvas displayed. app.init unresolved.', 24, 48);
-              document.body.appendChild(emergency);
-              // Attempt minimal pixi bootstrap without async init (legacy style) to see if rendering path fundamentally works
-              try {
-                console.log('[boot] attempting minimal legacy Application bootstrap');
-                const legacyApp = new Application();
-                // Direct access: some versions allow renderer creation via .init; fallback createRenderer if available
-                if ((legacyApp as any).init){
-                  legacyApp.init({ background: '#1d2027', antialias:true, preference:'webgl' }).then(()=>{
-                    console.log('[boot] legacy init succeeded');
-                    document.body.appendChild(legacyApp.canvas);
-                    const g = new Graphics(); g.rect(0,0,200,100).fill({ color:0x336699});
-                    legacyApp.stage.addChild(g);
-                  }).catch(err=> console.error('[boot] legacy init failed', err));
-                } else {
-                  console.warn('[boot] legacy path: no init method available');
-                }
-              } catch (legacyErr){
-                console.error('[boot] minimal legacy bootstrap exception', legacyErr);
-              }
-            }
-          }
-        }, 8000);
-      }
-      res(void 0);
-    }, INIT_TIMEOUT_MS))
-  ]);
-  // Ensure actual completion awaited (in case we only saw timeout branch first)
-  if (!initResolved){
-    console.log('[boot] awaiting real app.init completion after timeout…');
-    await initPromise;
-  }
-  console.log('[boot] app.init resolved in', (performance.now()-initStart).toFixed(1)+'ms');
-  console.log('[boot] application init complete', { rendererType: (app as any).renderer?.name, size: { w: app.renderer.width, h: app.renderer.height } });
-  const root = document.getElementById('app-root');
-  if (!root) {
-    console.error('[boot] ERROR: #app-root not found');
-  } else {
     root.appendChild(app.canvas);
-    console.log('[boot] canvas appended');
+  } catch(err){
+    console.error('[bootstrap] append canvas failed', err);
+    // @ts-ignore
+    window.__PIXICANVAS_ERROR = err;
+    return;
   }
-  // Defensive double-check in case append failed silently
-  if (!app.canvas.parentElement) {
-    console.warn('[boot] WARN: canvas has no parent after append attempt');
-  }
-} catch (err) {
-  console.error('[boot] PIXI init failed', err);
-  console.error('[boot] stack', (err as any)?.stack);
-  // Surface a visible marker in DOM for easier remote debugging
-  const marker = document.createElement('div');
-  marker.style.cssText = 'position:fixed;top:0;left:0;background:#900;color:#fff;padding:6px;font:12px system-ui;z-index:9999';
-  marker.textContent = 'Boot error: ' + (err instanceof Error ? err.message : String(err));
-  document.body.appendChild(marker);
-  throw err;
-}
-// --- Parallax Background Layers ---
-const parallaxContainer = new Container();
-parallaxContainer.zIndex = -1000;
-app.stage.addChild(parallaxContainer);
-let parallaxLayers: { g: Graphics; depth: number }[] = [];
-let mouseParallaxX = 0; let mouseParallaxY = 0; let finalShakeAmp = 0; // updated during final slot shake
-function buildParallax(){
-  parallaxContainer.removeChildren();
-  parallaxLayers = [];
-  const w = app.renderer.width;
-  const h = app.renderer.height;
-  const layerDefs = [
-    { color: 0x10151c, depth: 0.15 },
-    { color: 0x151c24, depth: 0.3 },
-    { color: 0x1b242e, depth: 0.55 }
-  ];
-  layerDefs.forEach((def,i)=>{
-    const g = new Graphics();
-    // oversize so translation doesn't show edges
-    const pad = 60 + i*20;
-    g.rect(-pad,-pad,w + pad*2, h + pad*2);
-    g.fill({ color: def.color });
-    // subtle stroke/striation effect using thin horizontal lines for deepest layer
-    if (def.depth > 0.4){
-      for (let y=0; y<h; y+=42){
-        const line = new Graphics();
-        line.rect(-pad, y, w + pad*2, 2);
-        line.fill({ color: 0x222e3a, alpha: 0.12 });
-        g.addChild(line);
-      }
-    }
-    parallaxContainer.addChild(g);
-    parallaxLayers.push({ g, depth: def.depth });
+  console.log('[bootstrap] Pixi application initialized', {
+    size: { w: app.renderer.width, h: app.renderer.height },
+    dpr: window.devicePixelRatio,
+    rendererType: app.renderer.type
   });
+  // @ts-ignore
+  window.__PIXIBOOT_DONE = true;
+  // Containers (declare after app exists)
+  leftContainer = new Container();
+  centerContainer = new Container();
+  rightContainer = new Container();
+  app.stage.addChild(leftContainer, centerContainer, rightContainer);
+  app.stage.sortableChildren = true;
+  // Continue initial UI construction once Pixi ready
+  postInit();
 }
-buildParallax();
-window.addEventListener('mousemove', (e)=>{
-  const rect = app.canvas.getBoundingClientRect();
-  const cx = rect.left + rect.width/2;
-  const cy = rect.top + rect.height/2;
-  mouseParallaxX = ((e.clientX - cx) / (rect.width/2));
-  mouseParallaxY = ((e.clientY - cy) / (rect.height/2));
-});
-// ticker to animate parallax easing + shake jitter
-app.ticker.add(()=>{
-  parallaxLayers.forEach(({ g, depth }) => {
-    // base target from mouse
-    const targetX = mouseParallaxX * depth * 40;
-    const targetY = mouseParallaxY * depth * 24;
-    // add small random jitter during final shake ramp scaled by finalShakeAmp
-    const jitterX = finalShakeAmp > 0 ? (Math.random()-0.5)*finalShakeAmp*6*depth : 0;
-    const jitterY = finalShakeAmp > 0 ? (Math.random()-0.5)*finalShakeAmp*4*depth : 0;
-    const desiredX = targetX + jitterX;
-    const desiredY = targetY + jitterY;
-    g.x += (desiredX - g.x)*0.06; // gentle easing
-    g.y += (desiredY - g.y)*0.06;
-  });
-});
-// DOM wheel listener to handle ticket list scrolling only within left panel bounds
-app.canvas.addEventListener('wheel', (e:WheelEvent) => {
-  const rect = app.canvas.getBoundingClientRect();
-  const mouseX = e.clientX - rect.left;
-  const mouseY = e.clientY - rect.top;
-  const panelX = leftContainer.x;
-  const panelY = leftContainer.y;
-  const headerHeight = 28; // keep in sync with buildLeftSpacer
-  const inPanel = mouseX >= panelX && mouseX <= panelX + SIDE_COLUMN_WIDTH && mouseY >= panelY && mouseY <= panelY + ticketsVisibleHeight + headerHeight;
-  if (!inPanel) return;
-  e.preventDefault();
-  e.stopPropagation();
-  scrollTicketsBy(e.deltaY);
-}, { passive:false });
+if (document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', () => { initPixi(); });
+} else {
+  initPixi();
+}
 
-// Containers
-const centerContainer = new Container();
-const leftContainer = new Container();
-const rightContainer = new Container();
-app.stage.addChild(leftContainer);
-app.stage.addChild(centerContainer);
-app.stage.addChild(rightContainer);
-// Allow zIndex ordering for bonus overlay/containers
-app.stage.sortableChildren = true;
+// Code that depends on containers/app moved into postInit to ensure ordering.
+function postInit(){
+  // Instantiate ticket panel structures now that leftContainer exists
+  ticketsHeaderContainer = new Container();
+  ticketsListContainer = new Container();
+  ticketsScrollbar = new Graphics();
+  leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer, ticketsScrollbar);
+  attachTicketPanelInteractions();
+  // Initial ticket render & layout chain
+  renderTickets(); refreshStakeLimitStatus(); updatePlayButtonState(); updateRandomButtonState(); updateClearButtonState();
+  buildGrid();
+  layout();
+  buildLeftSpacer();
+  buildRightSlots();
+  layout();
+  window.addEventListener('resize', () => { buildGrid(); layout(); });
+}
 
-// Ticket panel containers: fixed header + scrollable list
-const ticketsHeaderContainer = new Container();
-const ticketsListContainer = new Container();
-leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer);
+// Containers declared in initPixi; placeholder comments retained for context.
+
+// Ticket panel containers (created after Pixi init in postInit)
+let ticketsHeaderContainer: Container;
+let ticketsListContainer: Container;
 let ticketsScrollY = 0;
 let ticketsVisibleHeight = 0; // height of scrollable area (mask height)
-leftContainer.eventMode = 'static'; // using DOM wheel listener instead of Pixi for consistency
 let ticketsPanelHeight = 0;
-const ticketsScrollbar = new Graphics();
-leftContainer.addChild(ticketsScrollbar);
+let ticketsScrollbar: Graphics;
 let isDraggingTickets = false;
 let dragStartY = 0;
 let dragInitialScrollY = 0;
@@ -404,158 +238,119 @@ function updateTicketsScrollbar(){
   ticketsScrollbar.clear();
   // Intentionally no drawing. Scrolling still works via wheel/drag adjusting ticketsScrollY.
 }
-leftContainer.on('pointerdown', (e:any)=>{
-  const local = e.getLocalPosition(leftContainer);
-  if (local.x >=0 && local.x <= SIDE_COLUMN_WIDTH && local.y >= 28 && local.y <= 28 + ticketsVisibleHeight){
-    isDraggingTickets = true;
-    dragStartY = local.y;
-    dragInitialScrollY = ticketsScrollY;
-  }
-});
-leftContainer.on('pointerup', ()=>{ isDraggingTickets = false; });
-leftContainer.on('pointerupoutside', ()=>{ isDraggingTickets = false; });
-leftContainer.on('pointermove', (e:any)=>{
-  if (!isDraggingTickets) return;
-  const local = e.getLocalPosition(leftContainer);
-  const dy = local.y - dragStartY;
-  scrollTicketsBy(-dy);
-});
-
-function renderTickets() {
-  // Capture previous visual Y from existing motion entries before clearing
-  const prevVisual: Record<number, number> = {};
-  Object.keys(ticketMotion).forEach(idStr => {
-          const id = +idStr; const entry = ticketMotion[id]; if (entry && entry.card){ prevVisual[id] = entry.card.y; }
+// Interaction attachment deferred until containers exist
+function attachTicketPanelInteractions(){
+  if (!leftContainer || !ticketsHeaderContainer) return;
+  leftContainer.eventMode = 'static';
+  leftContainer.on('pointerdown', (e:any)=>{
+    const local = e.getLocalPosition(leftContainer);
+    if (local.x >=0 && local.x <= SIDE_COLUMN_WIDTH && local.y >= 28 && local.y <= 28 + ticketsVisibleHeight){
+      isDraggingTickets = true;
+      dragStartY = local.y;
+      dragInitialScrollY = ticketsScrollY;
+    }
   });
-  // Clear containers for rebuild
-  ticketsHeaderContainer.removeChildren();
+  leftContainer.on('pointerup', ()=>{ isDraggingTickets = false; });
+  leftContainer.on('pointerupoutside', ()=>{ isDraggingTickets = false; });
+  leftContainer.on('pointermove', (e:any)=>{
+    if (!isDraggingTickets) return;
+    const local = e.getLocalPosition(leftContainer);
+    const dy = local.y - dragStartY;
+    scrollTicketsBy(-dy);
+  });
+}
+
+let winGlowRefs: Graphics[] = [];
+function renderTickets(){
+  if (!ticketsHeaderContainer || !ticketsListContainer) return;
+  winGlowRefs = [];
   ticketsListContainer.removeChildren();
-  const panelWidth = SIDE_COLUMN_WIDTH;
-  const winGlowRefs: Graphics[] = [];
-  // Static header
-  const ticketsHeader = new Text('My Tickets', new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' }));
-  ticketsHeader.anchor.set(0.5,0); ticketsHeader.x = panelWidth/2; ticketsHeader.y = 0; ticketsHeaderContainer.addChild(ticketsHeader);
-  ticketsHeaderContainer.y = 0;
-  const startYOffset = 0; // list starts at y=0 inside list container; container itself positioned under header
-    tickets.forEach((ticket, idx) => {
-      const targetY = startYOffset + idx * (TICKET_HEIGHT + 10);
-      const card = new Graphics();
-      card.roundRect(0,0,panelWidth,TICKET_HEIGHT,14);
-      card.fill({ color: 0x1f242b });
-      // Remove default outline; only apply subtle glow if win
-      if (ticket.lastWin && ticket.lastWin>0){
-        card.stroke({ color:0x8c6b12, width:2 });
-      }
-      // Apply previous visual position if exists (for smooth transition), else start at target
-      if (prevVisual[ticket.id] !== undefined){
-        card.y = prevVisual[ticket.id];
-      } else {
-        card.y = targetY;
-      }
-      // Register motion target
-      ticketMotion[ticket.id] = { card, targetY };
-      (card as any).ticketId = ticket.id;
-      const stakeStr = formatStakeValue(ticket.stake);
-      const winSuffix = ticket.lastWin && ticket.lastWin>0 ? ` - ${formatStakeValue(ticket.lastWin)}` : '';
-      // Header text switches to bright gold on win
-      const headerStyle = new TextStyle({ fill: ticket.lastWin && ticket.lastWin>0 ? '#ffd54f' : '#ffcc66', fontSize:15, fontFamily:'system-ui', fontWeight:'600' });
-      const header = new Text(stakeStr + winSuffix, headerStyle);
-      header.anchor.set(0,0); header.x = 10; header.y = 6; card.addChild(header);
-      // Add subtle golden glow overlay for winners (non-animated lightweight)
-      if (ticket.lastWin && ticket.lastWin>0){
-        const glow = new Graphics();
-        glow.roundRect(-4,-4,panelWidth+8,TICKET_HEIGHT+8,18);
-        glow.stroke({ color:0xffd54f, width:3 });
-        glow.alpha = 0.3;
-        card.addChild(glow);
-        winGlowRefs.push(glow);
-      }
+  // Header (simple summary / could show total stake)
+  const headerBg = new Graphics(); headerBg.roundRect(0,0,SIDE_COLUMN_WIDTH,28,14); headerBg.fill({ color:0x1a2027 }); headerBg.stroke({ color:0x2e3a47, width:2 }); ticketsHeaderContainer.removeChildren(); ticketsHeaderContainer.addChild(headerBg);
+  const totalStake = totalConfirmedStake() + totalPendingStake();
+  const hdrText = new Text(`Tickets (${tickets.length})  Stake: ${formatStakeValue(totalStake)}`, new TextStyle({ fill:'#ffcc66', fontSize:13, fontFamily:'system-ui', fontWeight:'600' })); hdrText.anchor.set(0,0.5); hdrText.x = 10; hdrText.y = 14; ticketsHeaderContainer.addChild(hdrText);
+  tickets.forEach((ticket, idx) => {
+    const panelWidth = SIDE_COLUMN_WIDTH;
+    const card = new Graphics(); card.roundRect(0,0,panelWidth,TICKET_HEIGHT,16); card.fill({ color:0x232a34 }); card.stroke({ color:0x2f3d4b, width:2 }); card.y = idx * (TICKET_HEIGHT + 10);
+    // Motion tracking setup
+    if (!ticketMotion[ticket.id]){ ticketMotion[ticket.id] = { card, targetY: card.y }; }
+    else {
+      // Retain existing card reference if possible
+      ticketMotion[ticket.id].targetY = card.y;
+    }
+    // Header stake / win
+    const stakeStr = formatStakeValue(ticket.stake);
+    const winSuffix = ticket.lastWin && ticket.lastWin > 0 ? `  +${formatStakeValue(ticket.lastWin)}` : '';
+    const headerStyle = new TextStyle({ fill: ticket.lastWin && ticket.lastWin>0 ? '#ffd54f' : '#ffcc66', fontSize:15, fontFamily:'system-ui', fontWeight:'600' });
+    const header = new Text(stakeStr + winSuffix, headerStyle); header.anchor.set(0,0); header.x = 10; header.y = 6; card.addChild(header);
+    if (ticket.lastWin && ticket.lastWin>0){
+      const glow = new Graphics(); glow.roundRect(-4,-4,panelWidth+8,TICKET_HEIGHT+8,18); glow.stroke({ color:0xffd54f, width:3 }); glow.alpha = 0.3; card.addChild(glow); winGlowRefs.push(glow);
+    }
+    // Slots
     const slotSize = 34; const slotGap = 6; const totalSlotsWidth = slotSize * 5 + slotGap * 4; const startX = (panelWidth - totalSlotsWidth)/2; const startY = 34;
-    for (let i=0;i<5;i++) {
-      const slot = new Graphics(); slot.roundRect(0,0,slotSize,slotSize,8); const hasAnimal = i < ticket.animals.length;
+    for (let i=0;i<5;i++){
+      const hasAnimal = i < ticket.animals.length;
       const positional = hasAnimal && ticket.posMatches && ticket.posMatches[i];
       const anyMatch = hasAnimal && ticket.anyMatches && ticket.anyMatches[i];
+      const slot = new Graphics(); slot.roundRect(0,0,slotSize,slotSize,8);
       let fillColor = 0x1b222b;
-      if (hasAnimal) fillColor = 0x283342; // default filled
-      if (anyMatch) fillColor = 0x5d4a1a; // gold-ish for any-position
-      if (positional) fillColor = 0x1e4d2b; // green for positional
+      if (hasAnimal) fillColor = 0x283342;
+      if (anyMatch) fillColor = 0x5d4a1a;
+      if (positional) fillColor = 0x1e4d2b;
       slot.fill({ color: fillColor });
       slot.stroke({ color: positional ? 0x66bb6a : anyMatch ? 0xffd54f : 0x2f3d4b, width:1 });
       slot.x = startX + i*(slotSize + slotGap); slot.y = startY;
-      if (hasAnimal) {
+      if (hasAnimal){
         const a = animals.find(a=>a.id===ticket.animals[i]);
         if (a){
           const emo = new Text(a.emoji, new TextStyle({ fill:'#fff', fontSize:22 })); emo.anchor.set(0.5); emo.x=slotSize/2; emo.y=slotSize/2; slot.addChild(emo);
           if (positional || anyMatch){
-            const markerChar = positional ? '✓' : '★';
-            const marker = new Text(markerChar, new TextStyle({ fill: positional ? '#6ef392' : '#ffd54f', fontSize:14, fontWeight:'700' }));
-            marker.anchor.set(1,0); marker.x = slotSize - 4; marker.y = 4; slot.addChild(marker);
+            const markerChar = positional ? '\u2713' : '\u2605';
+            const marker = new Text(markerChar, new TextStyle({ fill: positional ? '#6ef392' : '#ffd54f', fontSize:14, fontWeight:'700' })); marker.anchor.set(1,0); marker.x = slotSize - 4; marker.y = 4; slot.addChild(marker);
           }
         }
       }
       card.addChild(slot);
     }
-    if (!ticket.complete) {
+    // Action buttons
+    if (!ticket.complete){
       const radius = 12.6; const gap = 5; const topY = 20; const rightEdge = panelWidth - 10; const confirmCenterX = rightEdge - radius; const deleteCenterX = confirmCenterX - (radius*2) - gap;
       const makeCircle = (color:number, stroke:number, x:number, enabled:boolean, label:string, onTap?:()=>void) => {
-        const g = new Graphics(); g.circle(0,0,radius); g.fill({ color }); g.stroke({ color: stroke, width:2 }); g.x = x; g.y = topY; const txt = new Text(label, new TextStyle({ fill:'#fff', fontSize: label==='✓'?14:13, fontWeight:'700' })); txt.anchor.set(0.5); g.addChild(txt); if (enabled && onTap) { g.eventMode='static'; g.cursor='pointer'; g.on('pointertap', onTap); } else { g.alpha = 0.35; } return g; };
+        const g = new Graphics(); g.circle(0,0,radius); g.fill({ color }); g.stroke({ color: stroke, width:2 }); g.x = x; g.y = topY; const txt = new Text(label, new TextStyle({ fill:'#fff', fontSize: label==='\u2713'?14:13, fontWeight:'700' })); txt.anchor.set(0.5); g.addChild(txt); if (enabled && onTap){ g.eventMode='static'; g.cursor='pointer'; g.on('pointertap', onTap); } else { g.alpha = 0.35; } return g; };
       const canConfirm = ticket.animals.length>0;
-      const confirmBtn = makeCircle(0x2e7d32,0x4caf50,confirmCenterX,canConfirm,'✓',()=>confirmTicket(ticket.id));
-      const deleteBtn = makeCircle(0xb71c1c,0xe53935,deleteCenterX,true,'✕',()=>deleteTicket(ticket.id));
+      const confirmBtn = makeCircle(0x2e7d32,0x4caf50,confirmCenterX,canConfirm,'\u2713',()=>confirmTicket(ticket.id));
+      const deleteBtn = makeCircle(0xb71c1c,0xe53935,deleteCenterX,true,'\u2715',()=>deleteTicket(ticket.id));
       card.addChild(confirmBtn, deleteBtn);
     }
     ticketsListContainer.addChild(card);
-    // Divider line below each ticket except the last
-    if (idx < tickets.length - 1){
-      const divider = new Graphics();
-      const margin = 8; // 5px space above and below divider
-      divider.rect(10, TICKET_HEIGHT + margin, panelWidth - 20, 2);
-      divider.fill({ color:0x2e3a47, alpha:0.7 });
-      card.addChild(divider);
-      // Increase card height area to include bottom margin visually (mask unaffected since we just use y positioning)
-    }
   });
-  // Recalculate scroll bounds after rerender to avoid truncated bottom
+  // Scroll bounds
   const contentHeight = getContentHeight();
   const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
   ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY));
   ticketsListContainer.y = 28 + ticketsScrollY;
   updateTicketsScrollbar();
-  console.log('[renderTickets] contentHeight', contentHeight, 'visible', ticketsVisibleHeight, 'scrollY', ticketsScrollY);
-  // Maintain motion entries only for current tickets
+  // Clean up motion entries for removed tickets
   const currentIds = new Set(tickets.map(t=>t.id));
   Object.keys(ticketMotion).forEach(idStr => { const id = +idStr; if (!currentIds.has(id)) delete ticketMotion[id]; });
-  // Ensure single global ticker to advance motion
+  // Ensure single ticker for motion
   const motionKey = '__ticketReorderMotion';
   // @ts-ignore
   if (!(app as any)[motionKey]){
-    const tick = () => {
-      Object.values(ticketMotion).forEach(entry => {
-        const dy = entry.targetY - entry.card.y;
-        if (Math.abs(dy) < 0.35){ entry.card.y = entry.targetY; }
-        else { entry.card.y += dy * REORDER_LERP_FACTOR; }
-      });
-    };
+    const tick = () => { Object.values(ticketMotion).forEach(entry => { const dy = entry.targetY - entry.card.y; entry.card.y += Math.abs(dy) < 0.35 ? dy : dy * REORDER_LERP_FACTOR; }); };
     // @ts-ignore
-    (app as any)[motionKey] = tick;
-    app.ticker.add(tick);
+    (app as any)[motionKey] = tick; app.ticker.add(tick);
   }
-  // Pulse glow alpha (single ticker observer). Avoid stacking multiple listeners by clearing previous.
-  if (app && winGlowRefs.length){
-    // Remove previous pulse if any by using a unique symbol stored on app as weak reference
+  // Winner glow pulse
+  if (app){
     const pulseKey = '__winGlowPulse';
     // @ts-ignore
-    if (app[pulseKey]){ app.ticker.remove(app[pulseKey]); }
-    let t=0;
-    const fn = ()=>{
-      t += 1;
-      const base = 0.25; const amp = 0.15;
-      const val = base + amp*Math.sin(t*0.08);
-      winGlowRefs.forEach(g=> g.alpha = val);
-    };
-    // @ts-ignore
-    app[pulseKey] = fn;
-    app.ticker.add(fn);
+    if ((app as any)[pulseKey]){ app.ticker.remove((app as any)[pulseKey]); }
+    if (winGlowRefs.length){
+      let t=0; const fn = ()=>{ t++; const base=0.25, amp=0.15; const val = base + amp*Math.sin(t*0.08); winGlowRefs.forEach(g=> g.alpha = val); };
+      // @ts-ignore
+      (app as any)[pulseKey] = fn; app.ticker.add(fn);
+    }
   }
 }
 
@@ -754,7 +549,7 @@ function layout() {
   // Resize left spacer if height changed
   buildLeftSpacer();
   buildRightSlots();
-  buildParallax(); // ensure parallax layers resize with viewport
+  // Parallax removed in clean build; placeholder comment retained
 }
 
 let resultSlots: Graphics[] = [];
@@ -1135,13 +930,13 @@ if (playBtn) {
                 }
                 const baseAmp = 6; // half of previous ~12
                 const amplitude = baseAmp * ampEnvelope + 1.2; // small floor to avoid total stillness
-                finalShakeAmp = ampEnvelope; // expose envelope to parallax ticker for jitter
+                // Parallax jitter removed in clean build
                 finalSlot.x = origX + Math.sin(phase) * amplitude * (Math.random()>0.55?1:-1);
                 finalSlot.y = origY + Math.cos(phase*1.25) * amplitude * 0.35;
                 if (frames>=totalFrames){
                   app.ticker.remove(drumRoll);
                   finalSlot.x = origX; finalSlot.y = origY;
-                  finalShakeAmp = 0; // reset
+                  // Parallax final shake reset removed
                   resolve(); // end shake -> immediately continue to final reveal
                 }
               }

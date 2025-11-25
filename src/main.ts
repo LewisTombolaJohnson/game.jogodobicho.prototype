@@ -134,10 +134,47 @@ let app: Application;
 try {
   console.log('[boot] creating Application');
   app = new Application();
+  // Add early capability diagnostics before init
+  const testCanvas = document.createElement('canvas');
+  const gl = testCanvas.getContext('webgl');
+  const webgl2 = testCanvas.getContext('webgl2');
+  console.log('[boot] capability check', { webgl: !!gl, webgl2: !!webgl2, ua: navigator.userAgent });
+  // Listen for preload/dynamic import failures
+  window.addEventListener('vite:preloadError', (e:any)=>{
+    console.error('[boot] EVENT vite:preloadError', e?.payload || e);
+  });
+  window.addEventListener('error', (e:any)=>{
+    console.error('[boot] EVENT window.error', e?.message || e);
+  });
+  window.addEventListener('unhandledrejection', (e:any)=>{
+    console.error('[boot] EVENT unhandledrejection', e?.reason || e);
+  });
   const initStart = performance.now();
   const initOptions = { background: '#12151c', resizeTo: window, antialias: true, preference: 'webgl' as const };
   console.log('[boot] calling app.init with options', initOptions);
-  await app.init(initOptions);
+  const INIT_TIMEOUT_MS = 4000;
+  let initResolved = false;
+  const initPromise = app.init(initOptions).then(()=>{
+    initResolved = true;
+  });
+  // Race with timeout for diagnostic logging (does not cancel real init)
+  await Promise.race([
+    initPromise,
+    new Promise(res=> setTimeout(()=>{
+      if (!initResolved){
+        console.warn('[boot] TIMEOUT: app.init has not resolved after', INIT_TIMEOUT_MS, 'ms');
+        // Dump currently loaded script tags for asset path inspection
+        const scripts = Array.from(document.querySelectorAll('script')).map(s=>({src:s.getAttribute('src'), type:s.type}));
+        console.log('[boot] scripts present at timeout', scripts);
+      }
+      res(void 0);
+    }, INIT_TIMEOUT_MS))
+  ]);
+  // Ensure actual completion awaited (in case we only saw timeout branch first)
+  if (!initResolved){
+    console.log('[boot] awaiting real app.init completion after timeout…');
+    await initPromise;
+  }
   console.log('[boot] app.init resolved in', (performance.now()-initStart).toFixed(1)+'ms');
   console.log('[boot] application init complete', { rendererType: (app as any).renderer?.name, size: { w: app.renderer.width, h: app.renderer.height } });
   const root = document.getElementById('app-root');

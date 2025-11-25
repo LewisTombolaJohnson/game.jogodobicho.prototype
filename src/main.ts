@@ -134,7 +134,11 @@ let app: Application;
 try {
   console.log('[boot] creating Application');
   app = new Application();
-  await app.init({ background: '#12151c', resizeTo: window, antialias: true });
+  const initStart = performance.now();
+  const initOptions = { background: '#12151c', resizeTo: window, antialias: true, preference: 'webgl' as const };
+  console.log('[boot] calling app.init with options', initOptions);
+  await app.init(initOptions);
+  console.log('[boot] app.init resolved in', (performance.now()-initStart).toFixed(1)+'ms');
   console.log('[boot] application init complete', { rendererType: (app as any).renderer?.name, size: { w: app.renderer.width, h: app.renderer.height } });
   const root = document.getElementById('app-root');
   if (!root) {
@@ -149,6 +153,7 @@ try {
   }
 } catch (err) {
   console.error('[boot] PIXI init failed', err);
+  console.error('[boot] stack', (err as any)?.stack);
   // Surface a visible marker in DOM for easier remote debugging
   const marker = document.createElement('div');
   marker.style.cssText = 'position:fixed;top:0;left:0;background:#900;color:#fff;padding:6px;font:12px system-ui;z-index:9999';

@@ -474,13 +474,10 @@ function renderTicketsMobile(prevVisual:Record<number,number>){
   const bg = new Graphics(); bg.roundRect(0,0,panelWidth,stripHeight,0); bg.fill({ color:0x151c1d, alpha:0.94 }); bg.stroke({ color:0x24313d, width:2 }); ticketsHeaderContainer.addChild(bg);
   const scrollContainer = new Container(); ticketsListContainer.addChild(scrollContainer);
   if (!tickets.length){ ticketsVisibleHeight = stripHeight; ticketsPanelHeight = stripHeight; return; }
-  // Pre-sort tickets by lastWin descending when idle (so best appear left). If none have lastWin, keep existing order.
-  if (!isPlaying){
-    tickets.sort((a,b)=>{
-      const aw = a.lastWin || 0; const bw = b.lastWin || 0;
-      if (bw === aw) return a.id - b.id;
-      return bw - aw;
-    });
+  // During ticket building (not playing) ensure current editing ticket stays left-most (index 0)
+  if (!isPlaying && editingTicketId !== null){
+    const idx = tickets.findIndex(t=> t.id === editingTicketId);
+    if (idx > 0){ const [t] = tickets.splice(idx,1); tickets.unshift(t); }
   }
   let xCursor = 12; const gapX = 12;
   tickets.forEach(ticket => {
@@ -733,21 +730,23 @@ function layout() {
     // 2. Animal grid centered below strip
     // 3. Horizontal result row below grid
     // 4. Bottom HTML controls remain fixed in DOM
-    const bottomBarApprox = 110; // matches CSS bottom action bar
+  // Measure actual bottom control bar height if present (fallback to estimate)
+  const bottomBarEl = document.querySelector('.bottom-bar') as HTMLElement | null;
+  const bottomBarApprox = bottomBarEl ? bottomBarEl.getBoundingClientRect().height : 110;
     const safeAreaTop = detectMobileSafeTop();
     const safeAreaBottom = detectMobileSafeBottom();
     const interGap = 8; // vertical gaps between major sections
     // Position ticket strip container first (render AFTER setting y so visuals align)
     leftContainer.x = 0; leftContainer.y = safeAreaTop;
     // Compute remaining vertical space for grid
-    const spaceForGrid = h - bottomBarApprox - safeAreaTop - MOBILE_TICKET_STRIP_HEIGHT - interGap - MOBILE_RESULT_SLOT_HEIGHT - safeAreaBottom - interGap;
+  let spaceForGrid = h - bottomBarApprox - safeAreaTop - MOBILE_TICKET_STRIP_HEIGHT - interGap - MOBILE_RESULT_SLOT_HEIGHT - safeAreaBottom - interGap;
     // Reset scale to measure raw grid size
     centerContainer.scale.set(1);
     // Width constrained by horizontal margin
     const maxGridWidth = w - 40;
     const widthScale = maxGridWidth / centerContainer.width;
     const heightScale = spaceForGrid / centerContainer.height;
-    const gridScale = Math.min(1, Math.min(widthScale, heightScale));
+    let gridScale = Math.min(1, Math.min(widthScale, heightScale));
     centerContainer.scale.set(gridScale);
     centerContainer.x = (w - centerContainer.width)/2;
     centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
@@ -755,11 +754,23 @@ function layout() {
   // Align result row horizontally with grid (centered beneath animal box matrix)
   rightContainer.x = centerContainer.x;
     rightContainer.y = centerContainer.y + centerContainer.height + interGap;
-    // If result row would extend beyond available viewport (minus bottom bar), reduce grid scale slightly
-    const overflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT) - (h - bottomBarApprox);
-    if (overflow > 0){
-      const reduceFactor = Math.max(0.85, (centerContainer.height - overflow) / centerContainer.height);
-      centerContainer.scale.set(centerContainer.scale.x * reduceFactor);
+    // Iteratively shrink grid if overflow pushes result row below visible area
+    let attempts = 0;
+    while (attempts < 4){
+      const overflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT) - (h - bottomBarApprox);
+      if (overflow <= 0) break;
+      gridScale *= 0.92; // shrink ~8% each attempt
+      centerContainer.scale.set(gridScale);
+      centerContainer.x = (w - centerContainer.width)/2;
+      centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
+      rightContainer.y = centerContainer.y + centerContainer.height + interGap;
+      attempts++;
+    }
+    // Final safety clamp: if still overflowing, reduce CARD_SIZE influence via additional scale factor
+    const finalOverflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT) - (h - bottomBarApprox);
+    if (finalOverflow > 0){
+      const emergencyFactor = Math.max(0.75, (centerContainer.height - finalOverflow) / centerContainer.height);
+      centerContainer.scale.set(centerContainer.scale.x * emergencyFactor);
       centerContainer.x = (w - centerContainer.width)/2;
       centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
       rightContainer.y = centerContainer.y + centerContainer.height + interGap;
@@ -1226,12 +1237,7 @@ if (playBtn) {
       const { multiplier, posMatches, anyMatches } = computeTicketWin(ticket, progressiveDrawn);
       ticket.posMatches = posMatches; ticket.anyMatches = anyMatches; ticket.lastWin = ticket.stake * multiplier; totalWin += ticket.lastWin;
     });
-    // Final post-play ordering (highest lastWin first) for subsequent mobile strip display
-    tickets.sort((a,b)=>{
-      const aw = a.lastWin || 0; const bw = b.lastWin || 0;
-      if (bw === aw) return a.id - b.id;
-      return bw - aw;
-    });
+    // (Removed final lastWin sort; sorting only occurs during progressive reveals while playing)
     if (totalWin > 0) {
       animateBalanceTo(balance + totalWin);
       spawnWinPopup(totalWin);

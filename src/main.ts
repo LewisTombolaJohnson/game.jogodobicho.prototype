@@ -465,7 +465,10 @@ function renderTicketsMobile(prevVisual:Record<number,number>){
   const panelWidth = app.renderer.width;
   ticketsHeaderContainer.removeChildren();
   ticketsListContainer.removeChildren();
-  const stripHeight = 88;
+  // Use global configurable strip height to allow layout math elsewhere
+  const stripHeight = MOBILE_TICKET_STRIP_HEIGHT;
+  // Ensure any desktop scroll mask is removed in mobile mode so horizontal cards remain visible
+  ticketsListContainer.mask = null;
   const bg = new Graphics(); bg.roundRect(0,0,panelWidth,stripHeight,0); bg.fill({ color:0x151c1d, alpha:0.94 }); bg.stroke({ color:0x24313d, width:2 }); ticketsHeaderContainer.addChild(bg);
   const scrollContainer = new Container(); ticketsListContainer.addChild(scrollContainer);
   if (!tickets.length){ ticketsVisibleHeight = stripHeight; ticketsPanelHeight = stripHeight; return; }
@@ -511,6 +514,35 @@ const SIDE_GAP = 30; // gap between grid and side columns
 const BOTTOM_UI_HEIGHT = 110;
 const TOP_MARGIN = 30;
 const SIDE_COLUMN_WIDTH = 210; // width for ticket panel and reveal slots columns
+
+// --- Mobile Layout Constants & Helpers ---
+// Centralized constants so layout() and renderers share values.
+const MOBILE_TICKET_STRIP_HEIGHT = 88; // horizontal ticket strip height
+const MOBILE_RESULT_SLOT_HEIGHT = 78; // height of each result slot in mobile horizontal row
+
+// Detect approximate safe-area (notch) padding. Since we are in canvas, rely on CSS env vars if exposed.
+function detectMobileSafeTop(): number {
+  try {
+    // Read CSS variable if author provided; fallback heuristic.
+    const style = getComputedStyle(document.documentElement);
+    const val = style.getPropertyValue('--safe-top') || '0';
+    const parsed = parseInt(val.trim(), 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  } catch(e){ /* ignore */ }
+  // Heuristic: if innerHeight significantly smaller than screen height, assume notch ~ 20
+  if (/Mobile|Android|iP(ad|hone)/.test(navigator.userAgent)) return 12; // modest default
+  return 0;
+}
+function detectMobileSafeBottom(): number {
+  try {
+    const style = getComputedStyle(document.documentElement);
+    const val = style.getPropertyValue('--safe-bottom') || '0';
+    const parsed = parseInt(val.trim(), 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  } catch(e){ /* ignore */ }
+  if (/Mobile|Android|iP(ad|hone)/.test(navigator.userAgent)) return 8;
+  return 0;
+}
 
 // Helper map last two digits -> animal group
 function getAnimalByTwoDigits(two: string) {
@@ -674,20 +706,36 @@ function layout() {
   const w = app.renderer.width;
   const h = app.renderer.height;
   if (mobileMode){
-    // Determine available vertical space excluding ticket strip + result row + margins (~ bottom bar height 110)
-    const bottomBarApprox = 110; const marginTop = 8; const interGap = 6; const stripApprox = 88; const resultRowApprox = 78 + 12; // slot height + gap
-    const availableHeightForGrid = h - bottomBarApprox - marginTop - interGap - stripApprox - resultRowApprox - 12; // extra margin
-    // Scale by width and height constraints
-    const maxGridWidth = w - 40;
-    // Temporarily reset scale to 1 to measure raw size
+    // --- Mobile Layout Order ---
+    // 1. Ticket strip (horizontal) at top (safe-area aware)
+    // 2. Animal grid centered below strip
+    // 3. Horizontal result row below grid
+    // 4. Bottom HTML controls remain fixed in DOM
+    const bottomBarApprox = 110; // matches CSS bottom action bar
+    const safeAreaTop = detectMobileSafeTop();
+    const safeAreaBottom = detectMobileSafeBottom();
+    const interGap = 8; // vertical gaps between major sections
+    // Position ticket strip container first (render AFTER setting y so visuals align)
+    leftContainer.x = 0; leftContainer.y = safeAreaTop;
+    // Compute remaining vertical space for grid
+    const spaceForGrid = h - bottomBarApprox - safeAreaTop - MOBILE_TICKET_STRIP_HEIGHT - interGap - MOBILE_RESULT_SLOT_HEIGHT - safeAreaBottom - interGap;
+    // Reset scale to measure raw grid size
     centerContainer.scale.set(1);
+    // Width constrained by horizontal margin
+    const maxGridWidth = w - 40;
     const widthScale = maxGridWidth / centerContainer.width;
-    const heightScale = availableHeightForGrid / centerContainer.height;
-    const scale = Math.min(1, Math.min(widthScale, heightScale));
-    centerContainer.scale.set(scale);
-    centerContainer.x = (w - centerContainer.width)/2; centerContainer.y = marginTop;
-    leftContainer.x = 0; leftContainer.y = centerContainer.y + centerContainer.height + interGap;
+    const heightScale = spaceForGrid / centerContainer.height;
+    const gridScale = Math.min(1, Math.min(widthScale, heightScale));
+    centerContainer.scale.set(gridScale);
+    centerContainer.x = (w - centerContainer.width)/2;
+    centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
+    // Result row placement
+  // Align result row horizontally with grid (centered beneath animal box matrix)
+  rightContainer.x = centerContainer.x;
+    rightContainer.y = centerContainer.y + centerContainer.height + interGap;
+    // Render tickets AFTER positioning leftContainer so strip uses correct y
     renderTickets();
+    // Build result slots after assigning rightContainer.y
     buildRightSlots();
     return;
   }
@@ -754,12 +802,23 @@ function buildRightSlots() {
 
 function buildRightSlotsMobile(){
   rightContainer.removeChildren(); resultSlots = [];
-  const slotCount=5; const gap=10; const slotW = Math.min(110,(app.renderer.width - 40 - gap*(slotCount-1))/slotCount); const slotH = 78;
-  const totalW = slotW*slotCount + gap*(slotCount-1); const startX = (app.renderer.width - totalW)/2;
-  const startY = (leftContainer.y + (ticketsPanelHeight || 88) + 6);
-  for(let i=0;i<slotCount;i++){
-    const slot = new Graphics(); slot.roundRect(0,0,slotW,slotH,14); slot.fill({ color:0x232a34 }); slot.stroke({ color:0x445364, width:2 }); slot.x = startX + i*(slotW+gap); slot.y = startY;
-    const numeral = new Text(String(i+1), new TextStyle({ fill:'#ffffff', fontSize:50, fontFamily:'system-ui', fontWeight:'700'})); numeral.anchor.set(0.5); numeral.x=slotW/2; numeral.y=slotH/2; numeral.alpha=0.06; slot.addChild(numeral);
+  const slotCount = 5; const gap = 10;
+  const effectiveWidth = app.renderer.width - 40; // horizontal padding
+  const slotW = Math.min(112, (effectiveWidth - gap*(slotCount-1))/slotCount);
+  const slotH = MOBILE_RESULT_SLOT_HEIGHT;
+  const totalW = slotW*slotCount + gap*(slotCount-1);
+  // Position relative to grid so slots appear directly beneath the 25 animal boxes
+  const gridLeft = centerContainer.x;
+  const gridWidth = centerContainer.width;
+  const startX = gridLeft + (gridWidth - totalW)/2;
+  const startY = rightContainer.y; // rightContainer.y already positioned by layout()
+  for (let i=0;i<slotCount;i++){
+    const slot = new Graphics();
+    slot.roundRect(0,0,slotW,slotH,14);
+    slot.fill({ color:0x232a34 });
+    slot.stroke({ color:0x445364, width:2 });
+    slot.x = startX + i*(slotW+gap); slot.y = startY;
+    const numeral = new Text(String(i+1), new TextStyle({ fill:'#ffffff', fontSize:48, fontFamily:'system-ui', fontWeight:'700'})); numeral.anchor.set(0.5); numeral.x = slotW/2; numeral.y = slotH/2; numeral.alpha=0.06; slot.addChild(numeral);
     rightContainer.addChild(slot); resultSlots.push(slot);
   }
 }

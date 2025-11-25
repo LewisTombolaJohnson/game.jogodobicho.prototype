@@ -253,6 +253,13 @@ app.canvas.addEventListener('wheel', (e:WheelEvent) => {
 const centerContainer = new Container();
 const leftContainer = new Container();
 const rightContainer = new Container();
+// Expose for mobile layout adjustments
+(window as any).centerContainer = centerContainer;
+(window as any).leftContainer = leftContainer;
+(window as any).rightContainer = rightContainer;
+// Mobile mode flag (set by mobile entry)
+let mobileMode = false;
+(window as any).setMobileMode = (v:boolean)=>{ mobileMode = v; renderTickets(); buildGrid(); layout(); };
 app.stage.addChild(leftContainer);
 app.stage.addChild(centerContainer);
 app.stage.addChild(rightContainer);
@@ -323,6 +330,7 @@ function renderTickets() {
   // Clear containers for rebuild
   ticketsHeaderContainer.removeChildren();
   ticketsListContainer.removeChildren();
+  if (mobileMode){ return renderTicketsMobile(prevVisual); }
   const panelWidth = SIDE_COLUMN_WIDTH;
   const winGlowRefs: Graphics[] = [];
   // Static header
@@ -450,6 +458,49 @@ function renderTickets() {
     app[pulseKey] = fn;
     app.ticker.add(fn);
   }
+}
+
+// Mobile horizontal ticket strip renderer
+function renderTicketsMobile(prevVisual:Record<number,number>){
+  const panelWidth = app.renderer.width;
+  ticketsHeaderContainer.removeChildren();
+  ticketsListContainer.removeChildren();
+  const stripHeight = 88;
+  const bg = new Graphics(); bg.roundRect(0,0,panelWidth,stripHeight,0); bg.fill({ color:0x151c1d, alpha:0.94 }); bg.stroke({ color:0x24313d, width:2 }); ticketsHeaderContainer.addChild(bg);
+  const scrollContainer = new Container(); ticketsListContainer.addChild(scrollContainer);
+  if (!tickets.length){ ticketsVisibleHeight = stripHeight; ticketsPanelHeight = stripHeight; return; }
+  let xCursor = 12; const gapX = 12;
+  tickets.forEach(ticket => {
+    const cardW = 160; const cardH = 72;
+    const card = new Graphics(); card.roundRect(0,0,cardW,cardH,16); card.fill({ color:0x1f242b }); if (ticket.lastWin && ticket.lastWin>0){ card.stroke({ color:0x8c6b12, width:2 }); }
+    card.x = xCursor; card.y = 8; (card as any).ticketId = ticket.id;
+    const stakeStr = formatStakeValue(ticket.stake); const winSuffix = ticket.lastWin && ticket.lastWin>0 ? ` +${formatStakeValue(ticket.lastWin)}` : '';
+    const header = new Text(stakeStr + winSuffix, new TextStyle({ fill: ticket.lastWin && ticket.lastWin>0 ? '#ffd54f' : '#ffcc66', fontSize:13, fontFamily:'system-ui', fontWeight:'600' })); header.anchor.set(0,0); header.x=8; header.y=6; card.addChild(header);
+    const slotSize=26; const slotGap=4; const totalSlotsWidth=slotSize*5 + slotGap*4; const startXSlots=(cardW-totalSlotsWidth)/2; const startYSlots=30;
+    for (let i=0;i<5;i++){
+      const slot = new Graphics(); slot.roundRect(0,0,slotSize,slotSize,7);
+      const has = i < ticket.animals.length; const positional = has && ticket.posMatches && ticket.posMatches[i]; const anyMatch = has && ticket.anyMatches && ticket.anyMatches[i];
+      let fillColor = 0x1b222b; if (has) fillColor = 0x283342; if (anyMatch) fillColor = 0x5d4a1a; if (positional) fillColor = 0x1e4d2b;
+      slot.fill({ color:fillColor }); slot.stroke({ color: positional ? 0x66bb6a : anyMatch ? 0xffd54f : 0x2f3d4b, width:1 });
+      slot.x = startXSlots + i*(slotSize+slotGap); slot.y = startYSlots;
+      if (has){ const a = animals.find(a=>a.id===ticket.animals[i]); if (a){ const emo = new Text(a.emoji, new TextStyle({ fill:'#fff', fontSize:18 })); emo.anchor.set(0.5); emo.x=slotSize/2; emo.y=slotSize/2; slot.addChild(emo); } }
+      card.addChild(slot);
+    }
+    if (!ticket.complete){
+      const radius=11; const gap=4; const topY=22; const rightEdge=cardW-8; const confirmX=rightEdge - radius; const deleteX=confirmX - radius*2 - gap;
+      const makeBtn=(color:number, stroke:number, x:number, label:string, enabled:boolean, fn?:()=>void)=>{ const g=new Graphics(); g.circle(0,0,radius); g.fill({ color }); g.stroke({ color:stroke, width:2 }); g.x=x; g.y=topY; const txt=new Text(label,new TextStyle({ fill:'#fff', fontSize:12, fontWeight:'700'})); txt.anchor.set(0.5); g.addChild(txt); if(enabled&&fn){ g.eventMode='static'; g.cursor='pointer'; g.on('pointertap',fn);} else { g.alpha=0.35; } return g; };
+      const canConfirm = ticket.animals.length>0;
+      card.addChild(makeBtn(0x2e7d32,0x4caf50,confirmX,'✓',canConfirm,()=>confirmTicket(ticket.id)));
+      card.addChild(makeBtn(0xb71c1c,0xe53935,deleteX,'✕',true,()=>deleteTicket(ticket.id)));
+    }
+    scrollContainer.addChild(card); xCursor += cardW + gapX;
+  });
+  let dragging=false; let dragStartX=0; let baseX=0; scrollContainer.eventMode='static'; scrollContainer.cursor='grab';
+  scrollContainer.on('pointerdown',(e:any)=>{ dragging=true; dragStartX=e.global.x; baseX=scrollContainer.x; scrollContainer.cursor='grabbing'; });
+  const endDrag=()=>{ dragging=false; scrollContainer.cursor='grab'; };
+  scrollContainer.on('pointerup',endDrag); scrollContainer.on('pointerupoutside',endDrag);
+  scrollContainer.on('pointermove',(e:any)=>{ if(!dragging) return; const dx=e.global.x - dragStartX; scrollContainer.x = baseX + dx; const maxScroll=12; const minScroll=Math.min(12, panelWidth - (xCursor)); if(scrollContainer.x>maxScroll) scrollContainer.x=maxScroll; if(scrollContainer.x<minScroll) scrollContainer.x=minScroll; });
+  ticketsVisibleHeight = stripHeight; ticketsPanelHeight = stripHeight; ticketsListContainer.y = 0; ticketsHeaderContainer.y = 0;
 }
 
 // Constants
@@ -586,6 +637,7 @@ function buildGrid() {
 
 // Replace old left spacer build function with ticket panel sizing
 function buildLeftSpacer() { // renamed function preserved for layout calls
+  if (mobileMode){ return; }
   leftContainer.removeChildren();
   const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
   const headerHeight = 28;
@@ -621,6 +673,24 @@ function buildLeftSpacer() { // renamed function preserved for layout calls
 function layout() {
   const w = app.renderer.width;
   const h = app.renderer.height;
+  if (mobileMode){
+    // Determine available vertical space excluding ticket strip + result row + margins (~ bottom bar height 110)
+    const bottomBarApprox = 110; const marginTop = 8; const interGap = 6; const stripApprox = 88; const resultRowApprox = 78 + 12; // slot height + gap
+    const availableHeightForGrid = h - bottomBarApprox - marginTop - interGap - stripApprox - resultRowApprox - 12; // extra margin
+    // Scale by width and height constraints
+    const maxGridWidth = w - 40;
+    // Temporarily reset scale to 1 to measure raw size
+    centerContainer.scale.set(1);
+    const widthScale = maxGridWidth / centerContainer.width;
+    const heightScale = availableHeightForGrid / centerContainer.height;
+    const scale = Math.min(1, Math.min(widthScale, heightScale));
+    centerContainer.scale.set(scale);
+    centerContainer.x = (w - centerContainer.width)/2; centerContainer.y = marginTop;
+    leftContainer.x = 0; leftContainer.y = centerContainer.y + centerContainer.height + interGap;
+    renderTickets();
+    buildRightSlots();
+    return;
+  }
   // Potential total width
   const gridWidth = centerContainer.width;
   let totalWidth = gridWidth + SIDE_COLUMN_WIDTH * 2 + SIDE_GAP * 2; // left + right + gaps
@@ -652,6 +722,7 @@ function layout() {
 
 let resultSlots: Graphics[] = [];
 function buildRightSlots() {
+  if (mobileMode){ return buildRightSlotsMobile(); }
   rightContainer.removeChildren();
   resultSlots = [];
   const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
@@ -678,6 +749,18 @@ function buildRightSlots() {
     slot.addChild(numeral);
     rightContainer.addChild(slot);
     resultSlots.push(slot);
+  }
+}
+
+function buildRightSlotsMobile(){
+  rightContainer.removeChildren(); resultSlots = [];
+  const slotCount=5; const gap=10; const slotW = Math.min(110,(app.renderer.width - 40 - gap*(slotCount-1))/slotCount); const slotH = 78;
+  const totalW = slotW*slotCount + gap*(slotCount-1); const startX = (app.renderer.width - totalW)/2;
+  const startY = (leftContainer.y + (ticketsPanelHeight || 88) + 6);
+  for(let i=0;i<slotCount;i++){
+    const slot = new Graphics(); slot.roundRect(0,0,slotW,slotH,14); slot.fill({ color:0x232a34 }); slot.stroke({ color:0x445364, width:2 }); slot.x = startX + i*(slotW+gap); slot.y = startY;
+    const numeral = new Text(String(i+1), new TextStyle({ fill:'#ffffff', fontSize:50, fontFamily:'system-ui', fontWeight:'700'})); numeral.anchor.set(0.5); numeral.x=slotW/2; numeral.y=slotH/2; numeral.alpha=0.06; slot.addChild(numeral);
+    rightContainer.addChild(slot); resultSlots.push(slot);
   }
 }
 

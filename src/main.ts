@@ -155,29 +155,35 @@ try {
   const INIT_TIMEOUT_MS = 4000;
   let initResolved = false;
   // Pre-fetch expected dynamic chunks to surface 404 / CSP issues early
-  const expectedChunks = [
-    'browserAll',
-    'webworkerAll',
-    'colorToUniform',
-    'WebGPURenderer',
-    'SharedSystems',
-    'WebGLRenderer'
-  ];
+  // Determine actual chunk filenames already emitted by Vite (avoid synthetic probe 404s)
+  const expectedChunks: string[] = [];
+  try {
+    const scriptTags = Array.from(document.querySelectorAll('script')); // index + dynamic chunk preloads present
+    scriptTags.forEach(s => {
+      const src = s.getAttribute('src');
+      if (src && /assets\/.+\.js$/.test(src) && !/index-/.test(src)) {
+        // record base chunk label for reporting
+        const file = src.split('/').pop()!; // e.g. WebGLRenderer-Wkavy6li.js
+        expectedChunks.push(file);
+      }
+    });
+  } catch (scanErr){
+    console.warn('[boot] unable to scan existing chunk scripts', scanErr);
+  }
   const chunkResults: Record<string,{ok:boolean; status:number; url:string}> = {};
   try {
-    const scriptBase = (document.querySelector('script[type="module"][src*="index-"]') as HTMLScriptElement)?.src || location.href;
-    const baseDir = scriptBase.replace(/index-[^/]+\.js.*$/,'');
-    await Promise.all(expectedChunks.map(async name => {
-      const pattern = new RegExp(name+"-.*\\.js$");
-      // Look for matching existing script tags first
-      const found = Array.from(document.querySelectorAll('script')).find(s=> pattern.test(s.getAttribute('src')||''));
-      const chunkUrl = found?.getAttribute('src') || baseDir + 'assets/' + name + '-probe.js';
+    await Promise.all(expectedChunks.map(async fileName => {
+      const tag = Array.from(document.querySelectorAll('script')).find(s=> (s.getAttribute('src')||'').endsWith(fileName));
+      const chunkUrl = tag?.getAttribute('src');
+      if (!chunkUrl){
+        chunkResults[fileName] = { ok:false, status:404, url:'<missing script tag>' }; return;
+      }
       try {
         const res = await fetch(chunkUrl, { method:'GET' });
-        chunkResults[name] = { ok: res.ok, status: res.status, url: chunkUrl };
+        chunkResults[fileName] = { ok: res.ok, status: res.status, url: chunkUrl };
       } catch (fetchErr){
-        chunkResults[name] = { ok:false, status: -1, url: chunkUrl };
-        console.error('[boot] chunk fetch error', name, fetchErr);
+        chunkResults[fileName] = { ok:false, status: -1, url: chunkUrl };
+        console.error('[boot] chunk fetch error', fileName, fetchErr);
       }
     }));
     console.log('[boot] chunk prefetch summary', chunkResults);
@@ -224,6 +230,24 @@ try {
               ctx!.font = '16px system-ui';
               ctx!.fillText('Fallback canvas displayed. app.init unresolved.', 24, 48);
               document.body.appendChild(emergency);
+              // Attempt minimal pixi bootstrap without async init (legacy style) to see if rendering path fundamentally works
+              try {
+                console.log('[boot] attempting minimal legacy Application bootstrap');
+                const legacyApp = new Application();
+                // Direct access: some versions allow renderer creation via .init; fallback createRenderer if available
+                if ((legacyApp as any).init){
+                  legacyApp.init({ background: '#1d2027', antialias:true, preference:'webgl' }).then(()=>{
+                    console.log('[boot] legacy init succeeded');
+                    document.body.appendChild(legacyApp.canvas);
+                    const g = new Graphics(); g.rect(0,0,200,100).fill({ color:0x336699});
+                    legacyApp.stage.addChild(g);
+                  }).catch(err=> console.error('[boot] legacy init failed', err));
+                } else {
+                  console.warn('[boot] legacy path: no init method available');
+                }
+              } catch (legacyErr){
+                console.error('[boot] minimal legacy bootstrap exception', legacyErr);
+              }
             }
           }
         }, 8000);

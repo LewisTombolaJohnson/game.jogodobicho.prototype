@@ -194,11 +194,9 @@ function buildParallax(){
   ];
   layerDefs.forEach((def,i)=>{
     const g = new Graphics();
-    // oversize so translation doesn't show edges
     const pad = 60 + i*20;
     g.rect(-pad,-pad,w + pad*2, h + pad*2);
     g.fill({ color: def.color });
-    // subtle stroke/striation effect using thin horizontal lines for deepest layer
     if (def.depth > 0.4){
       for (let y=0; y<h; y+=42){
         const line = new Graphics();
@@ -509,7 +507,9 @@ function renderTicketsMobile(prevVisual:Record<number,number>){
   scrollContainer.on('pointerdown',(e:any)=>{ dragging=true; dragStartX=e.global.x; baseX=scrollContainer.x; scrollContainer.cursor='grabbing'; });
   const endDrag=()=>{ dragging=false; scrollContainer.cursor='grab'; };
   scrollContainer.on('pointerup',endDrag); scrollContainer.on('pointerupoutside',endDrag);
-  scrollContainer.on('pointermove',(e:any)=>{ if(!dragging) return; const dx=e.global.x - dragStartX; scrollContainer.x = baseX + dx; const maxScroll=12; const minScroll=Math.min(12, panelWidth - (xCursor)); if(scrollContainer.x>maxScroll) scrollContainer.x=maxScroll; if(scrollContainer.x<minScroll) scrollContainer.x=minScroll; });
+  // Total content width for accurate bounds
+  const totalContentWidth = xCursor;
+  scrollContainer.on('pointermove',(e:any)=>{ if(!dragging) return; const dx=e.global.x - dragStartX; scrollContainer.x = baseX + dx; const maxScroll=12; const minScroll=Math.min(12, panelWidth - totalContentWidth - 12); if(scrollContainer.x>maxScroll) scrollContainer.x=maxScroll; if(scrollContainer.x<minScroll) scrollContainer.x=minScroll; });
   // Horizontal wheel scroll support (shift to horizontal translation)
   const wheelHandler = (e:WheelEvent) => {
     const rect = app.canvas.getBoundingClientRect();
@@ -517,8 +517,13 @@ function renderTicketsMobile(prevVisual:Record<number,number>){
     // Only scroll if within strip vertical bounds
     if (my >= leftContainer.y && my <= leftContainer.y + stripHeight){
       e.preventDefault(); e.stopPropagation();
-      const maxScroll=12; const minScroll=Math.min(12, panelWidth - (xCursor));
-      scrollContainer.x = Math.max(minScroll, Math.min(maxScroll, scrollContainer.x - e.deltaY));
+      const maxScroll=12; const minScroll=Math.min(12, panelWidth - totalContentWidth - 12);
+      // Use deltaY to drive horizontal movement; apply speed factor for finer control
+      const speed = 0.55; // tune factor
+      const targetX = scrollContainer.x - e.deltaY * speed;
+      scrollContainer.x = Math.max(minScroll, Math.min(maxScroll, targetX));
+      // Debug scroll position
+      // console.log('[ticket-strip-scroll] x=', scrollContainer.x.toFixed(1));
     }
   };
   window.addEventListener('wheel', wheelHandler, { passive:false });
@@ -541,6 +546,7 @@ const SIDE_COLUMN_WIDTH = 210; // width for ticket panel and reveal slots column
 // Centralized constants so layout() and renderers share values.
 const MOBILE_TICKET_STRIP_HEIGHT = 88; // horizontal ticket strip height
 const MOBILE_RESULT_SLOT_HEIGHT = 78; // height of each result slot in mobile horizontal row
+const MOBILE_CABINET_SCALE = 0.85; // base shrink factor for grid/card cabinet on mobile
 
 // Detect approximate safe-area (notch) padding. Since we are in canvas, rely on CSS env vars if exposed.
 function detectMobileSafeTop(): number {
@@ -704,17 +710,29 @@ function buildLeftSpacer() { // renamed function preserved for layout calls
   leftContainer.addChild(desktopTicketMask);
   // Header sits above bg now
   leftContainer.addChild(ticketsHeaderContainer, ticketsListContainer);
-  // Optional mask removed to prevent white rectangle; enable only if content overflows
-  ticketsListContainer.mask = null;
+  // Restore scroll mask: apply when content exceeds visible height
+  const contentHeight = getContentHeight();
+  const visibleListHeight = Math.max(0, gridHeight - headerHeight);
+  if (contentHeight > visibleListHeight) {
+    // Stationary mask in parent coordinates covering ticket panel area below header
+    const maskShape = new Graphics();
+    maskShape.roundRect(0, headerHeight, SIDE_COLUMN_WIDTH, visibleListHeight, 18);
+    maskShape.fill({ color:0xffffff }); // fill required for geometry
+    maskShape.alpha = 0; // invisible
+    ticketsListContainer.mask = maskShape;
+    leftContainer.addChild(maskShape);
+  } else {
+    ticketsListContainer.mask = null;
+  }
   // Scrollbar above mask
   leftContainer.addChild(ticketsScrollbar);
   ticketsVisibleHeight = Math.max(0, gridHeight - headerHeight);
   // Slight header lift for breathing space
   ticketsHeaderContainer.y = 0; // flush top
-  const contentHeight = getContentHeight();
   const minY = Math.min(0, ticketsVisibleHeight - contentHeight);
   ticketsScrollY = Math.max(minY, Math.min(0, ticketsScrollY));
   ticketsListContainer.y = headerHeight + ticketsScrollY;
+  console.log('[ticket-mask] contentHeight=', contentHeight, 'visibleHeight=', ticketsVisibleHeight, 'scrollY=', ticketsScrollY, 'maskApplied=', !!ticketsListContainer.mask);
   updateTicketsScrollbar();
   leftContainer.hitArea = new Rectangle(0,0,SIDE_COLUMN_WIDTH,Math.max(0,gridHeight));
   console.log('[buildLeftSpacer] freedHeader visibleHeight', ticketsVisibleHeight, 'contentHeight', contentHeight);
@@ -725,10 +743,10 @@ function layout() {
   const w = app.renderer.width;
   const h = app.renderer.height;
   if (mobileMode){
-    // --- Mobile Layout Order ---
+    // --- Mobile Layout Order (Option D) ---
     // 1. Ticket strip (horizontal) at top (safe-area aware)
-    // 2. Animal grid centered below strip
-    // 3. Horizontal result row below grid
+    // 2. Animal grid directly beneath ticket strip (maximize grid size first)
+    // 3. Callers (result) row beneath grid
     // 4. Bottom HTML controls remain fixed in DOM
   // Measure actual bottom control bar height if present (fallback to estimate)
   const bottomBarEl = document.querySelector('.bottom-bar') as HTMLElement | null;
@@ -736,45 +754,66 @@ function layout() {
     const safeAreaTop = detectMobileSafeTop();
     const safeAreaBottom = detectMobileSafeBottom();
     const interGap = 8; // vertical gaps between major sections
-    // Position ticket strip container first (render AFTER setting y so visuals align)
-    leftContainer.x = 0; leftContainer.y = safeAreaTop;
-    // Compute remaining vertical space for grid
-  let spaceForGrid = h - bottomBarApprox - safeAreaTop - MOBILE_TICKET_STRIP_HEIGHT - interGap - MOBILE_RESULT_SLOT_HEIGHT - safeAreaBottom - interGap;
+  // Position ticket strip first
+  leftContainer.x = 0; leftContainer.y = safeAreaTop;
+  // Raw grid size formula (unscaled) avoids inflated centerContainer.height due to transient effects
+  const rawGridHeight = GRID_COLS * CARD_SIZE + (GRID_COLS - 1) * GRID_GAP;
+  const rawGridWidth = GRID_COLS * CARD_SIZE + (GRID_COLS - 1) * GRID_GAP;
+  // Provisional space for grid (callers row below grid later). We'll allow callers row to force an earlier shrink if needed.
+  let spaceForGrid = h - bottomBarApprox - safeAreaTop - MOBILE_TICKET_STRIP_HEIGHT - interGap - MOBILE_RESULT_SLOT_HEIGHT - interGap - safeAreaBottom;
     // Reset scale to measure raw grid size
     centerContainer.scale.set(1);
     // Width constrained by horizontal margin
     const maxGridWidth = w - 40;
     const widthScale = maxGridWidth / centerContainer.width;
     const heightScale = spaceForGrid / centerContainer.height;
-    let gridScale = Math.min(1, Math.min(widthScale, heightScale));
-    centerContainer.scale.set(gridScale);
+  // Deterministic scale: ensure height fits exactly without iterative loops.
+  let gridScale = Math.min(1, Math.min(widthScale, heightScale)) * MOBILE_CABINET_SCALE;
+  centerContainer.scale.set(gridScale);
+  centerContainer.x = (w - centerContainer.width)/2;
+  // Grid directly beneath ticket strip
+  centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
+  // Minimal gap beneath grid for callers row
+  const callersGap = 4;
+  rightContainer.x = centerContainer.x;
+  rightContainer.y = centerContainer.y + centerContainer.height + callersGap;
+  // After positioning & potential shrink we will apply a post-loop smart shift.
+  // If callers row would overflow below bottom bar, shrink grid scale iteratively until it fits or floor reached
+  let guard=0;
+  while (guard < 6) {
+    const overflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT + interGap) - (h - bottomBarApprox);
+    if (overflow <= 0) break;
+    let currentScale = centerContainer.scale.x;
+    const newScale = currentScale * 0.93; // gentle shrink
+    if (newScale < 0.6) { break; }
+    centerContainer.scale.set(newScale);
     centerContainer.x = (w - centerContainer.width)/2;
     centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
-    // Result row placement
-  // Align result row horizontally with grid (centered beneath animal box matrix)
-  rightContainer.x = centerContainer.x;
-    rightContainer.y = centerContainer.y + centerContainer.height + interGap;
-    // Iteratively shrink grid if overflow pushes result row below visible area
-    let attempts = 0;
-    while (attempts < 4){
-      const overflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT) - (h - bottomBarApprox);
-      if (overflow <= 0) break;
-      gridScale *= 0.92; // shrink ~8% each attempt
-      centerContainer.scale.set(gridScale);
-      centerContainer.x = (w - centerContainer.width)/2;
-      centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
-      rightContainer.y = centerContainer.y + centerContainer.height + interGap;
-      attempts++;
-    }
-    // Final safety clamp: if still overflowing, reduce CARD_SIZE influence via additional scale factor
-    const finalOverflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT) - (h - bottomBarApprox);
-    if (finalOverflow > 0){
-      const emergencyFactor = Math.max(0.75, (centerContainer.height - finalOverflow) / centerContainer.height);
-      centerContainer.scale.set(centerContainer.scale.x * emergencyFactor);
-      centerContainer.x = (w - centerContainer.width)/2;
-      centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
-      rightContainer.y = centerContainer.y + centerContainer.height + interGap;
-    }
+    rightContainer.x = centerContainer.x;
+    rightContainer.y = centerContainer.y + centerContainer.height + callersGap;
+    guard++;
+  }
+  const finalOverflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT + interGap) - (h - bottomBarApprox);
+  // Debug raw vs displayed heights
+  const displayedGridH = centerContainer.height;
+  const formulaGridH = rawGridHeight * centerContainer.scale.y;
+  console.log('[grid-dimensions] rawH=', rawGridHeight, 'scale=', centerContainer.scale.y.toFixed(3), 'formulaH=', formulaGridH.toFixed(1), 'displayH=', displayedGridH.toFixed(1));
+  if (finalOverflow > 0) {
+    console.log('[mobile-layout-cabinet] WARNING callers overflow remains', finalOverflow.toFixed(1));
+  }
+  // Shrink if overflow below bottom bar
+  let safety=0; while (safety<5){
+    const overflow = (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT) - (h - bottomBarApprox);
+    if (overflow <= 0) break;
+    gridScale *= 0.92; centerContainer.scale.set(gridScale);
+  centerContainer.x = (w - centerContainer.width)/2;
+  centerContainer.y = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT + interGap;
+  rightContainer.y = centerContainer.y + centerContainer.height + interGap;
+  safety++;
+    if (gridScale < 0.55) break;
+  }
+  rightContainer.zIndex = 50;
+  console.log('[mobile-layout-cabinet] scale=', gridScale.toFixed(3), 'gridH(formula)=', formulaGridH.toFixed(1), 'gridH(display)=', centerContainer.height.toFixed(1), 'gridTopY=', centerContainer.y, 'callersTop=', rightContainer.y, 'callersBottom=', (rightContainer.y + MOBILE_RESULT_SLOT_HEIGHT), 'vh=', h);
     // Render tickets AFTER positioning leftContainer so strip uses correct y
     renderTickets();
     // Build result slots after assigning rightContainer.y
@@ -794,6 +833,7 @@ function layout() {
     centerContainer.scale.set(1);
   }
   const startX = (w - totalWidth) / 2;
+  // Revert to vertical centering of grid within available space
   const verticalSpace = h - BOTTOM_UI_HEIGHT - TOP_MARGIN - 20;
   const gridHeight = centerContainer.height;
   const startY = TOP_MARGIN + (verticalSpace - gridHeight) / 2;
@@ -816,14 +856,18 @@ function buildRightSlots() {
   rightContainer.removeChildren();
   resultSlots = [];
   const gridHeight = centerContainer.height || (CARD_SIZE * GRID_COLS + GRID_GAP * (GRID_COLS - 1));
+  const headerHeight = 28;
+  const bg = new Graphics();
+  bg.roundRect(0, headerHeight, SIDE_COLUMN_WIDTH, Math.max(0, gridHeight - headerHeight), 18);
+  bg.fill({ color: 0x1a2027 });
+  bg.stroke({ color:0x2e3a47, width:2 });
+  rightContainer.addChild(bg);
   const header = new Text('Game Result', new TextStyle({ fill:'#ffcc66', fontSize:16, fontFamily:'system-ui', fontWeight:'600' }));
   header.anchor.set(0.5,0);
   header.x = SIDE_COLUMN_WIDTH/2; header.y = 0;
   rightContainer.addChild(header);
-  const slotCount = 5;
-  const gap = 16;
-  const headerOffset = 30; // space for header
-  const availableHeight = gridHeight - headerOffset;
+  const slotCount = 5; const gap = 16;
+  const availableHeight = gridHeight - headerHeight;
   const totalGapHeight = gap * (slotCount - 1);
   const slotHeight = (availableHeight - totalGapHeight) / slotCount;
   for (let i=0;i<slotCount;i++) {
@@ -831,7 +875,7 @@ function buildRightSlots() {
     slot.roundRect(0,0,SIDE_COLUMN_WIDTH,slotHeight,14);
     slot.fill({ color: 0x232a34 });
     slot.stroke({ color: 0x445364, width:2 });
-    slot.y = headerOffset + i * (slotHeight + gap);
+    slot.y = headerHeight + i * (slotHeight + gap);
     const numeralStyle = new TextStyle({ fill:'#ffffff', fontSize: Math.min(140, slotHeight * 0.8), fontFamily:'system-ui', fontWeight:'700', align:'center' });
     const numeral = new Text(String(i+1), numeralStyle);
     numeral.anchor.set(0.5);
@@ -845,23 +889,31 @@ function buildRightSlots() {
 function buildRightSlotsMobile(){
   rightContainer.removeChildren(); resultSlots = [];
   const slotCount = 5; const gap = 10;
-  const effectiveWidth = app.renderer.width - 40; // horizontal padding
-  const slotW = Math.min(112, (effectiveWidth - gap*(slotCount-1))/slotCount);
-  const slotH = MOBILE_RESULT_SLOT_HEIGHT;
+  const effectiveWidth = app.renderer.width - 40;
+  let slotW = Math.min(108, (effectiveWidth - gap*(slotCount-1))/slotCount);
+  let slotH = MOBILE_RESULT_SLOT_HEIGHT;
+  // Ensure callers row fits even on very short screens: shrink if overlapping ticket strip
+  const ticketStripBottom = leftContainer.y + MOBILE_TICKET_STRIP_HEIGHT;
+  if (rightContainer.y + slotH + 4 > leftContainer.y){
+    slotH = Math.max(56, leftContainer.y - rightContainer.y - 6);
+  }
   const totalW = slotW*slotCount + gap*(slotCount-1);
-  // Position relative to grid so slots appear directly beneath the 25 animal boxes
-  const gridLeft = centerContainer.x;
-  const gridWidth = centerContainer.width;
-  const startX = gridLeft + (gridWidth - totalW)/2;
-  const startY = rightContainer.y; // rightContainer.y already positioned by layout()
+  const startX = (app.renderer.width - totalW)/2;
+  const startY = rightContainer.y;
+  // High-contrast temporary debug backdrop (will remove later)
+  const backdrop = new Graphics(); backdrop.roundRect(0,startY-2,app.renderer.width,slotH+8,0); backdrop.fill({ color:0xff0077, alpha:0.22 }); backdrop.stroke({ color:0xff4081, width:3 }); rightContainer.addChild(backdrop);
+  rightContainer.mask = null;
+  rightContainer.zIndex = 200; // ensure above grid
+  // Log global container bounds
+  console.log('[callers-container] top=', startY, 'bottom=', startY + slotH, 'zIndex=', rightContainer.zIndex);
   for (let i=0;i<slotCount;i++){
-    const slot = new Graphics();
-    slot.roundRect(0,0,slotW,slotH,14);
-    slot.fill({ color:0x232a34 });
-    slot.stroke({ color:0x445364, width:2 });
+    const slot = new Graphics(); slot.roundRect(0,0,slotW,slotH,12); slot.fill({ color:0x232a34 }); slot.stroke({ color:0x445364, width:2 });
     slot.x = startX + i*(slotW+gap); slot.y = startY;
-    const numeral = new Text(String(i+1), new TextStyle({ fill:'#ffffff', fontSize:48, fontFamily:'system-ui', fontWeight:'700'})); numeral.anchor.set(0.5); numeral.x = slotW/2; numeral.y = slotH/2; numeral.alpha=0.06; slot.addChild(numeral);
+    const numeral = new Text(String(i+1), new TextStyle({ fill:'#ffffff', fontSize:42, fontFamily:'system-ui', fontWeight:'700'})); numeral.anchor.set(0.5); numeral.x=slotW/2; numeral.y=slotH/2; numeral.alpha=0.08; slot.addChild(numeral);
     rightContainer.addChild(slot); resultSlots.push(slot);
+    // Convert a sample local point to global to verify stage mapping
+    const globalPoint = { x: rightContainer.x + slot.x, y: slot.y }; // approximate
+    console.log('[result-slot] index', i, 'local', slot.x, slot.y, 'global', globalPoint.x, globalPoint.y, 'size', slotW, slotH);
   }
 }
 

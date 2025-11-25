@@ -18,6 +18,7 @@ const ticketMotion: Record<number,{card:Graphics; targetY:number}> = {};
 // --- Audio Manager (simple HTMLAudioElement wrapper) ---
 class AudioManager {
   private sounds: Record<string, HTMLAudioElement> = {};
+  private tones: Record<string,{frequency:number; duration:number; volume:number}> = {};
   private enabled = true;
   private unlocked = false;
   private ctx: AudioContext | null = null;
@@ -40,32 +41,53 @@ class AudioManager {
   register(key: string, src: string, volume=0.6){
     if (this.sounds[key]) return; const a = new Audio(src); a.volume = volume; a.preload = 'auto'; this.sounds[key] = a;
   }
+  // Register a synthesized tone (removes dependency on external audio file assets)
+  registerTone(key:string, frequency:number, duration=0.12, volume=0.5){
+    if (this.tones[key] || this.sounds[key]) return;
+    this.tones[key] = { frequency, duration, volume };
+  }
   play(key: string, opts?: { volume?: number; force?: boolean }){
     if (!this.enabled && !opts?.force) return; const a = this.sounds[key];
-    if (!a){ console.debug('[audio] missing sound', key); return; }
+    if (!a){
+      // Try tone fallback
+      const tone = this.tones[key];
+      if (tone){
+        this.beep(tone.frequency, tone.duration, opts?.volume ?? tone.volume);
+        return;
+      }
+      console.debug('[audio] missing sound', key);
+      return;
+    }
     if (opts?.volume !== undefined) a.volume = opts.volume;
     const attempt = () => { try { a.currentTime = 0; const p = a.play(); if (p && p.catch) p.catch(()=>{}); } catch(e){ /* ignore */ } };
     attempt();
   }
-  beep(frequency=880, duration=0.12){
+  // Synthesized tone using WebAudio (no external asset fetch)
+  beep(frequency=880, duration=0.12, volume=0.35){
     if (!this.ctx || !this.unlocked) return;
-    const osc = this.ctx.createOscillator(); const gain = this.ctx.createGain();
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
     osc.frequency.value = frequency; osc.type='sine';
-    gain.gain.value = 0.0001; gain.gain.linearRampToValueAtTime(0.25, this.ctx.currentTime + 0.01);
+    // Attack
+    gain.gain.setValueAtTime(0.0001, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(volume, this.ctx.currentTime + 0.015);
+    // Decay
     gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + duration);
-    osc.connect(gain); gain.connect(this.ctx.destination);
-    osc.start(); osc.stop(this.ctx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start();
+    osc.stop(this.ctx.currentTime + duration);
   }
   mute(){ this.enabled = false; }
   unmute(){ this.enabled = true; }
 }
 const audio = new AudioManager();
-// Register placeholder sounds (developer should replace with real asset paths)
-audio.register('select','/audio/select.mp3');
-audio.register('confirm','/audio/confirm.mp3');
-audio.register('drum','/audio/drum.mp3',0.45);
-audio.register('match','/audio/match.mp3',0.7);
-audio.register('bigwin','/audio/bigwin.mp3',0.85);
+// Register synthesized tones instead of external files to avoid 404s until assets provided
+audio.registerTone('select', 660, 0.09, 0.35); // bright short
+audio.registerTone('confirm', 523.25, 0.14, 0.4); // C5 confirm
+audio.registerTone('drum', 110, 0.25, 0.5); // low thump (sine approximation)
+audio.registerTone('match', 784, 0.18, 0.45); // G5 celebratory
+audio.registerTone('bigwin', 880, 0.6, 0.55); // A5 longer
 
 // Helper to read current stake from stake-value element (avoids ordering issues)
 function getCurrentStake(): number {

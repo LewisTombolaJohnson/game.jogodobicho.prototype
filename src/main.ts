@@ -1,4 +1,6 @@
 import { Application, Container, Graphics, Text, TextStyle, Rectangle } from 'pixi.js';
+// Boot instrumentation markers (will help diagnose GitHub Pages issues)
+console.log('[boot] module start');
 import { animals } from './animals';
 
 // Ticket data structures
@@ -127,12 +129,33 @@ function clearTickets() {
   renderTickets(); buildGrid(); layout(); refreshStakeLimitStatus(); updatePlayButtonState(); updateClearButtonState();
 }
 
-// Pixi init
-const app = new Application();
-await app.init({ background: '#12151c', resizeTo: window, antialias: true });
-const root = document.getElementById('app-root');
-if (!root) throw new Error('Missing app-root');
-root.appendChild(app.canvas);
+// Pixi init with instrumentation + guarded attachment
+let app: Application;
+try {
+  console.log('[boot] creating Application');
+  app = new Application();
+  await app.init({ background: '#12151c', resizeTo: window, antialias: true });
+  console.log('[boot] application init complete', { rendererType: (app as any).renderer?.name, size: { w: app.renderer.width, h: app.renderer.height } });
+  const root = document.getElementById('app-root');
+  if (!root) {
+    console.error('[boot] ERROR: #app-root not found');
+  } else {
+    root.appendChild(app.canvas);
+    console.log('[boot] canvas appended');
+  }
+  // Defensive double-check in case append failed silently
+  if (!app.canvas.parentElement) {
+    console.warn('[boot] WARN: canvas has no parent after append attempt');
+  }
+} catch (err) {
+  console.error('[boot] PIXI init failed', err);
+  // Surface a visible marker in DOM for easier remote debugging
+  const marker = document.createElement('div');
+  marker.style.cssText = 'position:fixed;top:0;left:0;background:#900;color:#fff;padding:6px;font:12px system-ui;z-index:9999';
+  marker.textContent = 'Boot error: ' + (err instanceof Error ? err.message : String(err));
+  document.body.appendChild(marker);
+  throw err;
+}
 // --- Parallax Background Layers ---
 const parallaxContainer = new Container();
 parallaxContainer.zIndex = -1000;

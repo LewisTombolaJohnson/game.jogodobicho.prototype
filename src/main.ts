@@ -89,6 +89,16 @@ audio.registerTone('drum', 110, 0.25, 0.5); // low thump (sine approximation)
 audio.registerTone('match', 784, 0.18, 0.45); // G5 celebratory
 audio.registerTone('bigwin', 880, 0.6, 0.55); // A5 longer
 
+// Version stamp & defensive override for any legacy scripts still calling audio.register('key','/audio/*.mp3')
+(window as any).__JOGO_BUILD_VERSION__ = 'audio-tones-v1';
+// Monkey-patch a global hook in case older concatenated bundle refers to previous API
+;(window as any).safeAudioRegister = (key:string, src:string, volume=0.6) => {
+  // Instead of fetching src (which would 404), map to a distinct synthesized tone signature
+  const hashFreq = 440 + (Math.abs([...key].reduce((a,c)=> a + c.charCodeAt(0),0)) % 360); // deterministic frequency
+  audio.registerTone(key, hashFreq, 0.18, volume * 0.6);
+  console.info(`[audio-fallback] redirected '${key}' from '${src}' to synthesized tone @${hashFreq}Hz`);
+};
+
 // Helper to read current stake from stake-value element (avoids ordering issues)
 function getCurrentStake(): number {
   const el = document.getElementById('stake-value');

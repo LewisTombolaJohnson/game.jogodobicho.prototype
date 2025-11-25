@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Jogo do Bicho Mobile</title>
+  <style>
+    html,body { margin:0; padding:0; height:100%; font-family: system-ui, Arial, sans-serif; background:#0b0e12; color:#eee; }
+    #app-root { position:relative; width:100vw; height:100vh; overflow:hidden; }
+    /* Mobile bottom/action bar */
+    .mobile-bar { position:absolute; left:0; right:0; bottom:0; display:flex; gap:6px; padding:6px 10px 10px; background:linear-gradient(180deg,#172029,#10171e); border-top:1px solid #24313d; box-shadow:0 -4px 12px rgba(0,0,0,.45); }
+    .m-block { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:72px; }
+    .m-block + .m-block { border-left:1px solid #24313d; }
+    .label { font-size:11px; font-weight:600; letter-spacing:.5px; color:#bfc7cf; margin-bottom:4px; }
+    .value { font-size:18px; font-weight:700; font-family:monospace; color:#ffcc66; }
+    .mini-row { display:flex; align-items:center; gap:8px; }
+    .btn { background:#ff9800; color:#111; font-weight:700; border:none; border-radius:14px; padding:10px 14px; font-size:15px; box-shadow:0 3px 8px rgba(0,0,0,.45); cursor:pointer; }
+    .btn.small { background:#607d8b; color:#fff; font-size:12px; padding:8px 10px; }
+    .stake-btn { background:#2c3642; color:#eee; border:1px solid #3a4756; width:34px; height:34px; font-weight:700; border-radius:10px; cursor:pointer; font-size:18px; display:flex; align-items:center; justify-content:center; }
+    .stake-btn:active, .btn:active { transform:translateY(1px); }
+    .stake-limit { font-size:9px; color:#8293a3; margin-top:2px; }
+    /* Scale canvas for mobile layout adaptation */
+    canvas { touch-action:none; }
+  </style>
+</head>
+<body>
+  <div id="app-root"></div>
+  <div class="mobile-bar">
+    <div class="m-block">
+      <div class="label">BALANCE</div>
+      <div class="value" id="balance-value">£1000</div>
+    </div>
+    <div class="m-block" style="flex:1.4">
+      <div class="mini-row" style="justify-content:center; width:100%;">
+        <button id="random-btn" class="btn small">Rand</button>
+        <button id="play-btn" class="btn" style="width:74px;">Play</button>
+        <button id="clear-btn" class="btn small">Clear</button>
+      </div>
+    </div>
+    <div class="m-block" style="flex:1.2">
+      <div class="label">STAKE</div>
+      <div class="mini-row">
+        <button id="stake-minus" class="stake-btn">-</button>
+        <div class="value" id="stake-value">5p</div>
+        <button id="stake-plus" class="stake-btn">+</button>
+      </div>
+      <div class="stake-limit">Limit £10</div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.mobile.ts"></script>
+</body>
+</html>
